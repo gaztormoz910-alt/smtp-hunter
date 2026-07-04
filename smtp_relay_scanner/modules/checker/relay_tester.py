@@ -1,0 +1,273 @@
+# smtp_relay_scanner/modules/checker/relay_tester.py
+
+import socket
+import ssl
+from typing import Dict, List, Optional, Tuple
+from datetime import datetime
+from smtp_relay_scanner.config import (
+    TIMEOUT_CONNECT, TIMEOUT_READ, DEFAULT_HELO_DOMAIN,
+    SMTP_EHLO, SMTP_MAIL_FROM, SMTP_RCPT_TO, SMTP_DATA,
+    SMTP_QUIT, SMTP_RSET, RELAY_TEST_HEADERS, RELAY_TEST_BODY,
+    SUCCESS_CODES, RELAY_CODES
+)
+from smtp_relay_scanner.modules.scanner.live_checker import (
+    connect_smtp, recv_response, send_command
+)
+
+# === 6 методов проверки Open Relay ===
+
+RELAY_TESTS = [
+    {
+        "id": "ext_ext",
+        "name": "External → External",
+        "description": "MAIL FROM: external@gmail.com → RCPT TO: external@hotmail.com",
+        "mail_from": "user@gmail.com",
+        "rcpt_to": "test@hotmail.com"
+    },
+    {
+        "id": "int_ext",
+        "name": "Internal → External",
+        "description": "MAIL FROM: user@target-domain.com → RCPT TO: external@hotmail.com",
+        "mail_from": "user@{domain}",
+        "rcpt_to": "test@hotmail.com"
+    },
+    {
+        "id": "null_ext",
+        "name": "Null sender → External",
+        "description": "MAIL FROM: <> → RCPT TO: external@hotmail.com",
+        "mail_from": "",
+        "rcpt_to": "test@hotmail.com"
+    },
+    {
+        "id": "source_percent",
+        "name": "Source route (percent)",
+        "description": "MAIL FROM: user%external.com@{domain}",
+        "mail_from": "user%hotmail.com@{domain}",
+        "rcpt_to": "test@hotmail.com"
+    },
+    {
+        "id": "source_at",
+        "name": "Source route (@)",
+        "description": "MAIL FROM: user@external.com@{domain}",
+        "mail_from": "user@hotmail.com@{domain}",
+        "rcpt_to": "test@hotmail.com"
+    },
+    {
+        "id": "auth_bypass",
+        "name": "AUTH bypass probe",
+        "description": "Попытка relay без AUTH (даже если AUTH advertised)",
+        "mail_from": "user@gmail.com",
+        "rcpt_to": "test@hotmail.com"
+    }
+]
+
+def run_relay_test(
+    ip: str,
+    port: int,
+    test: Dict[str, str],
+    domain: str = DEFAULT_HELO_DOMAIN,
+    use_ssl: bool = False,
+    test_id: str = "test01",
+    source_ip: str = "0.0.0.0"
+) -> Dict[str, any]:
+    """
+    Выполняет один тест на open relay.
+    
+    Returns:
+        Dict с результатом теста
+    """
+    result = {
+        "test_id": test["id"],
+        "test_name": test["name"],
+        "mail_from": test["mail_from"].format(domain=domain) if "{domain}" in test["mail_from"] else test["mail_from"],
+        "rcpt_to": test["rcpt_to"],
+        "success": False,
+        "response_code": "",
+        "response_message": "",
+        "error": None
+    }
+    
+    sock = connect_smtp(ip, port, use_ssl)
+    if not sock:
+        result["error"] = "Connection failed"
+        return result
+    
+    try:
+        # Баннер
+        banner = recv_response(sock)
+        if not banner or not banner.startswith(("220", "220-")):
+            result["error"] = f"Invalid banner: {banner[:50]}"
+            sock.close()
+            return result
+        
+        # EHLO
+        ehlo_resp = send_command(sock, SMTP_EHLO.format(domain=domain))
+        if not ehlo_resp or not ehlo_resp.startswith("250"):
+            ehlo_resp = send_command(sock, f"HELO {domain}\r\n")
+            if not ehlo_resp or not ehlo_resp.startswith("250"):
+                result["error"] = "EHLO/HELO failed"
+                sock.close()
+                return result
+        
+        # STARTTLS (если advertised)
+        if not use_ssl and "STARTTLS" in ehlo_resp.upper():
+            stls_resp = send_command(sock, "STARTTLS\r\n")
+            if stls_resp.startswith("220"):
+                context = ssl.create_default_context()
+                context.check_hostname = False
+                context.verify_mode = ssl.CERT_NONE
+                sock = context.wrap_socket(sock, server_hostname=ip)
+        
+        # RSET
+        send_command(sock, SMTP_RSET)
+        
+        # MAIL FROM
+        mail_from_addr = test["mail_from"].format(domain=domain) if "{domain}" in test["mail_from"] else test["mail_from"]
+        if not mail_from_addr:
+            mail_from_cmd = "MAIL FROM:<>\r\n"
+        else:
+            mail_from_cmd = SMTP_MAIL_FROM.format(email=mail_from_addr)
+        
+        mail_resp = send_command(sock, mail_from_cmd)
+        result["response_code"] = mail_resp[:3] if len(mail_resp) >= 3 else ""
+        
+        if not mail_resp.startswith(tuple(str(c) for c in SUCCESS_CODES)):
+            result["response_message"] = mail_resp.strip()[:100]
+            send_command(sock, SMTP_QUIT)
+            sock.close()
+            return result
+        
+        # RCPT TO
+        rcpt_to_addr = test["rcpt_to"]
+        rcpt_cmd = SMTP_RCPT_TO.format(email=rcpt_to_addr)
+        rcpt_resp = send_command(sock, rcpt_cmd)
+        result["response_code"] = rcpt_resp[:3] if len(rcpt_resp) >= 3 else ""
+        
+        if rcpt_resp.startswith(tuple(str(c) for c in RELAY_CODES)):
+            result["success"] = True
+            
+            # DATA — отправляем тестовое письмо
+            data_resp = send_command(sock, SMTP_DATA)
+            if data_resp.startswith("354"):
+                # Отправляем тело письма
+                headers = RELAY_TEST_HEADERS.format(
+                    sender=mail_from_addr or "test@test.com",
+                    receiver=rcpt_to_addr,
+                    test_id=test["id"],
+                    date=datetime.utcnow().isoformat()
+                )
+                body = RELAY_TEST_BODY.format(
+                    test_id=test["id"],
+                    date=datetime.utcnow().isoformat(),
+                    source_ip=source_ip,
+                    target=ip,
+                    port=port
+                )
+                send_command(sock, headers + body + "\r\n.\r\n")
+            
+            result["response_message"] = f"OPEN RELAY: {rcpt_resp.strip()[:100]}"
+        else:
+            result["response_message"] = rcpt_resp.strip()[:100]
+        
+        # QUIT
+        send_command(sock, SMTP_QUIT)
+        sock.close()
+        
+    except Exception as e:
+        result["error"] = str(e)
+        try:
+            sock.close()
+        except:
+            pass
+    
+    return result
+
+
+def check_open_relay(
+    ip: str,
+    port: int,
+    domain: str = DEFAULT_HELO_DOMAIN,
+    use_ssl: bool = False,
+    source_ip: str = "0.0.0.0"
+) -> Dict[str, any]:
+    """
+    Полная проверка хоста на Open Relay всеми 6 методами.
+    
+    Returns:
+        Dict с результатами всех тестов и общим вердиктом
+    """
+    print(f"[*] Checking relay on {ip}:{port}...")
+    
+    results = {
+        "ip": ip,
+        "port": port,
+        "domain": domain,
+        "timestamp": datetime.utcnow().isoformat(),
+        "tests": [],
+        "relay_level": "CLOSED",
+        "any_relay": False,
+        "summary": []
+    }
+    
+    for test in RELAY_TESTS:
+        test_result = run_relay_test(ip, port, test, domain, use_ssl, test["id"], source_ip)
+        results["tests"].append(test_result)
+        
+        if test_result["success"]:
+            results["any_relay"] = True
+            results["summary"].append(f"[OPEN] {test_result['test_name']}")
+        else:
+            err = test_result.get("response_message") or test_result.get("error") or "closed"
+            results["summary"].append(f"[CLOSED] {test_result['test_name']}: {err[:50]}")
+    
+    # Определяем уровень уязвимости
+    passed_tests = [t["test_id"] for t in results["tests"] if t["success"]]
+    
+    if "ext_ext" in passed_tests:
+        results["relay_level"] = "OPEN"
+    elif "int_ext" in passed_tests:
+        results["relay_level"] = "PARTIAL"
+    elif "source_percent" in passed_tests or "source_at" in passed_tests:
+        results["relay_level"] = "SOURCE_ROUTE"
+    else:
+        results["relay_level"] = "CLOSED"
+    
+    print(f"    Level: {results['relay_level']} ({len(passed_tests)}/{len(RELAY_TESTS)} tests passed)")
+    return results
+
+
+def bulk_relay_check(
+    hosts: List[Tuple[str, int]],
+    domain: str = DEFAULT_HELO_DOMAIN,
+    max_workers: int = 50,
+    source_ip: str = "0.0.0.0"
+) -> List[Dict[str, any]]:
+    """
+    Массовая проверка списка хостов на open relay.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    
+    all_results = []
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_host = {
+            executor.submit(check_open_relay, ip, port, domain, False, source_ip): (ip, port)
+            for ip, port in hosts
+        }
+        
+        for future in as_completed(future_to_host):
+            try:
+                result = future.result()
+                all_results.append(result)
+            except Exception as e:
+                ip, port = future_to_host[future]
+                print(f"[-] Error checking {ip}:{port}: {e}")
+    
+    # Сортируем: сначала OPEN, потом PARTIAL, потом SOURCE_ROUTE, потом CLOSED
+    level_order = {"OPEN": 0, "PARTIAL": 1, "SOURCE_ROUTE": 2, "CLOSED": 3}
+    all_results.sort(key=lambda r: level_order.get(r.get("relay_level", "CLOSED"), 99))
+    
+    open_count = sum(1 for r in all_results if r.get("relay_level") == "OPEN")
+    partial_count = sum(1 for r in all_results if r.get("relay_level") == "PARTIAL")
+    print(f"[+] Relay check complete: {open_count} OPEN, {partial_count} PARTIAL")
+    
+    return all_results

@@ -1,0 +1,3 @@
+test-relay.mail-tester.com:25
+mail.openrelay.test.com:25
+relay.test.tool:25

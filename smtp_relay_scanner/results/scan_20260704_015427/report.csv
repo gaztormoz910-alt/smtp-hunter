@@ -1,0 +1,5 @@
+ip,port,mta,relay_level,banner,starttls,auth_required,auth_methods,tests_passed,total_tests,timestamp
+smtp.yandex.ru,587,Unknown,CLOSED,,False,False,,0,6,2026-07-04T01:54:37.804478
+smtp.gmail.com,587,Unknown,CLOSED,,False,False,,0,6,2026-07-04T01:54:37.805290
+outlook.office365.com,587,Unknown,CLOSED,,False,False,,0,6,2026-07-04T01:54:37.805068
+smtp.mail.ru,587,Unknown,CLOSED,,False,False,,0,6,2026-07-04T01:54:37.804805

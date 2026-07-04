@@ -1,0 +1,4 @@
+smtp.gmail.com:587
+smtp.mail.ru:587
+smtp.yandex.ru:587
+outlook.office365.com:587

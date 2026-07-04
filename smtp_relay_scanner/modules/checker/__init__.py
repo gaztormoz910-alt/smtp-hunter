@@ -1,0 +1,1 @@
+# smtp_relay_scanner/modules/checker/__init__.py

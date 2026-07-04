@@ -1,0 +1,121 @@
+
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <title>SMTP Relay Scanner Report</title>
+        <style>
+            body {
+                font-family: 'Segoe UI', Arial, sans-serif;
+                background: #1a1a2e;
+                color: #e0e0e0;
+                padding: 20px;
+            }
+            h1 { color: #e94560; border-bottom: 2px solid #e94560; padding-bottom: 10px; }
+            h2 { color: #0f3460; }
+            .stats {
+                display: flex; gap: 20px; margin: 20px 0;
+            }
+            .stat-box {
+                padding: 15px 25px; border-radius: 8px; font-weight: bold; font-size: 18px;
+            }
+            .stat-open { background: #ff4444; color: white; }
+            .stat-partial { background: #ff8800; color: white; }
+            .stat-src { background: #ffaa00; color: black; }
+            .stat-closed { background: #44cc44; color: white; }
+            .stat-total { background: #16213e; color: white; border: 1px solid #0f3460; }
+            
+            table {
+                width: 100%; border-collapse: collapse; margin-top: 20px;
+                background: #16213e; border-radius: 8px; overflow: hidden;
+            }
+            th {
+                background: #0f3460; color: #e94560; padding: 12px 8px;
+                text-align: left; font-size: 13px; text-transform: uppercase;
+            }
+            td {
+                padding: 10px 8px; border-bottom: 1px solid #1a1a2e;
+                font-size: 14px;
+            }
+            tr:hover { background: #1a1a3e; }
+            .footer {
+                margin-top: 30px; font-size: 12px; color: #666;
+                text-align: center;
+            }
+        </style>
+    </head>
+    <body>
+        <h1>📧 SMTP Relay Scanner Report</h1>
+        <p>Generated: 2026-07-04 01:57:27 UTC</p>
+        
+        <div class="stats">
+            <div class="stat-box stat-total">Total: 4</div>
+            <div class="stat-box stat-open">OPEN: 0</div>
+            <div class="stat-box stat-partial">PARTIAL: 0</div>
+            <div class="stat-box stat-src">SRC ROUTE: 0</div>
+            <div class="stat-box stat-closed">CLOSED: 4</div>
+        </div>
+        
+        <table>
+            <thead>
+                <tr>
+                    <th>Host</th>
+                    <th>Level</th>
+                    <th>MTA</th>
+                    <th>TLS</th>
+                    <th>AUTH</th>
+                    <th>Banner</th>
+                    <th>Tests</th>
+                </tr>
+            </thead>
+            <tbody>
+                
+        <tr>
+            <td>smtp.yandex.ru:587</td>
+            <td style="color:#44cc44;font-weight:bold;">CLOSED</td>
+            <td>Unknown</td>
+            <td>✗</td>
+            <td>✗</td>
+            <td style="font-size:12px;"></td>
+            <td style="font-size:12px;"><span style="color:#44cc44;font-weight:bold;">CLOSED</span> External → External<br><span style="color:#44cc44;font-weight:bold;">CLOSED</span> Internal → External<br><span style="color:#44cc44;font-weight:bold;">CLOSED</span> Null sender → External<br><span style="color:#44cc44;font-weight:bold;">CLOSED</span> Source route (percent)<br><span style="color:#44cc44;font-weight:bold;">CLOSED</span> Source route (@)<br><span style="color:#44cc44;font-weight:bold;">CLOSED</span> AUTH bypass probe<br></td>
+        </tr>
+        
+        <tr>
+            <td>smtp.gmail.com:587</td>
+            <td style="color:#44cc44;font-weight:bold;">CLOSED</td>
+            <td>Unknown</td>
+            <td>✗</td>
+            <td>✗</td>
+            <td style="font-size:12px;"></td>
+            <td style="font-size:12px;"><span style="color:#44cc44;font-weight:bold;">CLOSED</span> External → External<br><span style="color:#44cc44;font-weight:bold;">CLOSED</span> Internal → External<br><span style="color:#44cc44;font-weight:bold;">CLOSED</span> Null sender → External<br><span style="color:#44cc44;font-weight:bold;">CLOSED</span> Source route (percent)<br><span style="color:#44cc44;font-weight:bold;">CLOSED</span> Source route (@)<br><span style="color:#44cc44;font-weight:bold;">CLOSED</span> AUTH bypass probe<br></td>
+        </tr>
+        
+        <tr>
+            <td>outlook.office365.com:587</td>
+            <td style="color:#44cc44;font-weight:bold;">CLOSED</td>
+            <td>Unknown</td>
+            <td>✗</td>
+            <td>✗</td>
+            <td style="font-size:12px;"></td>
+            <td style="font-size:12px;"><span style="color:#44cc44;font-weight:bold;">CLOSED</span> External → External<br><span style="color:#44cc44;font-weight:bold;">CLOSED</span> Internal → External<br><span style="color:#44cc44;font-weight:bold;">CLOSED</span> Null sender → External<br><span style="color:#44cc44;font-weight:bold;">CLOSED</span> Source route (percent)<br><span style="color:#44cc44;font-weight:bold;">CLOSED</span> Source route (@)<br><span style="color:#44cc44;font-weight:bold;">CLOSED</span> AUTH bypass probe<br></td>
+        </tr>
+        
+        <tr>
+            <td>smtp.mail.ru:587</td>
+            <td style="color:#44cc44;font-weight:bold;">CLOSED</td>
+            <td>Unknown</td>
+            <td>✗</td>
+            <td>✗</td>
+            <td style="font-size:12px;"></td>
+            <td style="font-size:12px;"><span style="color:#44cc44;font-weight:bold;">CLOSED</span> External → External<br><span style="color:#44cc44;font-weight:bold;">CLOSED</span> Internal → External<br><span style="color:#44cc44;font-weight:bold;">CLOSED</span> Null sender → External<br><span style="color:#44cc44;font-weight:bold;">CLOSED</span> Source route (percent)<br><span style="color:#44cc44;font-weight:bold;">CLOSED</span> Source route (@)<br><span style="color:#44cc44;font-weight:bold;">CLOSED</span> AUTH bypass probe<br></td>
+        </tr>
+        
+            </tbody>
+        </table>
+        
+        <div class="footer">
+            SMTP Relay Scanner v1.0 — For authorized security testing only
+        </div>
+    </body>
+    </html>
+    

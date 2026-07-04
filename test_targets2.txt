@@ -1,0 +1,5 @@
+alt4.gmail-smtp-in.l.google.com:25
+mta7.am0.yahoodns.net:25
+mx.yandex.ru:25
+mx2.mail.ru:25
+eu-smtp-inbound-1.mimecast.com:25
