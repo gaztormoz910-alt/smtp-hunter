@@ -55,40 +55,46 @@ def connect_smtp(ip: str, port: int, use_ssl: bool = False,
                  timeout: int = TIMEOUT_CONNECT) -> Optional[socket.socket]:
     """
     Устанавливает TCP/TLS соединение с SMTP сервером.
-    
-    Returns:
-        socket object или None
+    Пробует несколько таймаутов (3сек → 5сек → 10сек).
     """
-    try:
-        log.debug(f"Attempting connection to {ip}:{port} (SSL={use_ssl})")
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(timeout)
-        sock.connect((ip, port))
-        log.debug(f"Connected to {ip}:{port}")
-        
-        if use_ssl or port == 465:
-            context = ssl.create_default_context()
-            context.check_hostname = False
-            context.verify_mode = ssl.CERT_NONE
-            sock = context.wrap_socket(sock, server_hostname=ip)
-            log.debug(f"SSL/TLS handshake completed on {ip}:{port}")
-        
-        return sock
-    except socket.timeout:
-        log.error(f"Timeout connecting to {ip}:{port}")
-        return None
-    except ConnectionRefusedError:
-        log.error(f"Connection refused by {ip}:{port}")
-        return None
-    except socket.gaierror as e:
-        log.error(f"DNS resolution failed for {ip}:{port} — {e}")
-        return None
-    except ssl.SSLError as e:
-        log.error(f"SSL error on {ip}:{port} — {e}")
-        return None
-    except Exception as e:
-        log.error(f"Connection failed to {ip}:{port} — {type(e).__name__}: {e}")
-        return None
+    timeouts = [timeout, 5, 10]  # эскалируем таймаут
+    
+    for attempt, to in enumerate(timeouts):
+        try:
+            log.debug(f"Attempting connection to {ip}:{port} (SSL={use_ssl}, timeout={to}s)")
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(to)
+            sock.connect((ip, port))
+            log.debug(f"Connected to {ip}:{port}")
+            
+            if use_ssl or port == 465:
+                context = ssl.create_default_context()
+                context.check_hostname = False
+                context.verify_mode = ssl.CERT_NONE
+                sock = context.wrap_socket(sock, server_hostname=ip)
+                log.debug(f"SSL/TLS handshake completed on {ip}:{port}")
+            
+            return sock
+        except socket.timeout:
+            if attempt < len(timeouts) - 1:
+                log.debug(f"Timeout on {ip}:{port} (attempt {attempt+1}), retrying with {to}s...")
+                continue
+            log.error(f"Timeout connecting to {ip}:{port} (all attempts)")
+            return None
+        except ConnectionRefusedError:
+            log.error(f"Connection refused by {ip}:{port}")
+            return None
+        except socket.gaierror as e:
+            log.error(f"DNS resolution failed for {ip}:{port} — {e}")
+            return None
+        except ssl.SSLError as e:
+            log.error(f"SSL error on {ip}:{port} — {e}")
+            return None
+        except Exception as e:
+            log.error(f"Connection failed to {ip}:{port} — {type(e).__name__}: {e}")
+            return None
+    
+    return None
 
 
 def recv_response(sock: socket.socket, timeout: int = TIMEOUT_READ) -> str:
@@ -130,46 +136,51 @@ def send_command(sock: socket.socket, command: str) -> str:
 def check_live_smtp(ip: str, port: int, use_ssl: bool = False,
                     domain: str = DEFAULT_HELO_DOMAIN) -> Optional[Dict[str, any]]:
     """
-    Проверяет, жив ли SMTP сервер на IP:port, и собирает информацию.
-    
-    Returns:
-        Dict с баннером, MTA, EHLO ответом, STARTTLS поддержкой
-        или None если сервер не отвечает
+    Проверяет, жив ли SMTP сервер на IP:port.
+    Автоматически пробует STARTTLS если обычный EHLO упал.
     """
-    sock = connect_smtp(ip, port, use_ssl)
+    # Пробуем сначала без TLS
+    sock = connect_smtp(ip, port, use_ssl=False)
     if not sock:
         return None
     
     try:
-        # Читаем баннер
         banner = recv_response(sock)
         if not banner:
             sock.close()
             return None
         
-        if not banner.startswith(("220", "220-")):
-            sock.close()
-            return { "ip": ip, "port": port, "banner": banner, "mta": "Unknown" }
+        mta = detect_mta(banner)
         
         # EHLO
         ehlo_resp = send_command(sock, SMTP_EHLO.format(domain=domain))
-        
-        # Если EHLO не сработал, пробуем HELO
         if not ehlo_resp or not ehlo_resp.startswith("250"):
-            ehlo_resp = send_command(sock, SMTP_HELO.format(domain=domain))
+            ehlo_resp = send_command(sock, "HELO {domain}\r\n".format(domain=domain))
         
-        # Определяем MTA
-        mta = detect_mta(banner)
-        
-        # Проверка STARTTLS
+        # Проверяем STARTTLS в EHLO ответе
         starttls = "STARTTLS" in ehlo_resp.upper() if ehlo_resp else False
-        
-        # Проверка AUTH
-        auth_support = any(line.strip().upper().startswith("250-AUTH") 
+        auth_support = any(line.strip().upper().startswith("250-AUTH")
                           for line in ehlo_resp.split('\r\n')) if ehlo_resp else False
         
-        # Парсим EHLO строки
-        ehlo_lines = ehlo_resp.split('\r\n') if ehlo_resp else []
+        # Если STARTTLS доступен, но EHLO не сработал — пробуем STARTTLS
+        if starttls:
+            # Отправляем STARTTLS
+            starttls_resp = send_command(sock, "STARTTLS\r\n")
+            if "220" in starttls_resp:
+                try:
+                    context = ssl.create_default_context()
+                    context.check_hostname = False
+                    context.verify_mode = ssl.CERT_NONE
+                    sock = context.wrap_socket(sock, server_hostname=ip)
+                except:
+                    pass  # Если TLS не взлетел, работаем с тем что есть
+                
+                # Повторяем EHLO внутри TLS
+                tls_ehlo = send_command(sock, SMTP_EHLO.format(domain=domain))
+                if tls_ehlo and tls_ehlo.startswith("250"):
+                    ehlo_resp = tls_ehlo
+                    auth_support = any(line.strip().upper().startswith("250-AUTH")
+                                      for line in tls_ehlo.split('\r\n'))
         
         result = {
             "ip": ip,
@@ -183,10 +194,8 @@ def check_live_smtp(ip: str, port: int, use_ssl: bool = False,
             "domain": domain
         }
         
-        # QUIT
         send_command(sock, SMTP_QUIT)
         sock.close()
-        
         return result
     
     except Exception as e:

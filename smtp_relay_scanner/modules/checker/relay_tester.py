@@ -4,6 +4,8 @@ import socket
 import ssl
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime
+import logging
+log = logging.getLogger(__name__)
 from smtp_relay_scanner.config import (
     TIMEOUT_CONNECT, TIMEOUT_READ, DEFAULT_HELO_DOMAIN,
     SMTP_EHLO, SMTP_MAIL_FROM, SMTP_RCPT_TO, SMTP_DATA,
@@ -104,15 +106,33 @@ def run_relay_test(
         
         # EHLO
         ehlo_resp = send_command(sock, SMTP_EHLO.format(domain=domain))
+        
+        # Если EHLO не сработал — пробуем STARTTLS (обязательно для порта 587)
         if not ehlo_resp or not ehlo_resp.startswith("250"):
-            ehlo_resp = send_command(sock, f"HELO {domain}\r\n")
+            if "220" in ehlo_resp or "STARTTLS" in ehlo_resp.upper() or "250-STARTTLS" in (recv_response(sock) if not ehlo_resp else ""):
+                # Пробуем STARTTLS напрямую
+                stls_resp = send_command(sock, "STARTTLS\r\n")
+                if stls_resp and stls_resp.startswith("220"):
+                    try:
+                        context = ssl.create_default_context()
+                        context.check_hostname = False
+                        context.verify_mode = ssl.CERT_NONE
+                        sock = context.wrap_socket(sock, server_hostname=ip)
+                    except:
+                        pass
+                    # Повторяем EHLO внутри TLS
+                    ehlo_resp = send_command(sock, SMTP_EHLO.format(domain=domain))
+            
+            # Если всё ещё не сработало — HELO
             if not ehlo_resp or not ehlo_resp.startswith("250"):
-                result["error"] = "EHLO/HELO failed"
-                sock.close()
-                return result
+                ehlo_resp = send_command(sock, f"HELO {domain}\r\n")
+                if not ehlo_resp or not ehlo_resp.startswith("250"):
+                    result["error"] = "EHLO/HELO failed"
+                    sock.close()
+                    return result
         
         # AUTH (если есть credentials)
-        if username and password and "AUTH" in ehlo_resp.upper():
+        if username and password and ehlo_resp and "AUTH" in ehlo_resp.upper():
             auth_resp = _try_auth(sock, username, password)
             if not auth_resp:
                 result["error"] = "AUTH failed"
@@ -120,15 +140,25 @@ def run_relay_test(
                 sock.close()
                 return result
             log.debug(f"AUTH successful for {username}")
-
-        # STARTTLS (если advertised)
-        if not use_ssl and "STARTTLS" in ehlo_resp.upper():
+        
+        # STARTTLS (если EHLO его рекламирует, но мы ещё не в TLS)
+        if not use_ssl and not isinstance(sock, ssl.SSLSocket) and ehlo_resp and "STARTTLS" in ehlo_resp.upper():
             stls_resp = send_command(sock, "STARTTLS\r\n")
-            if stls_resp.startswith("220"):
-                context = ssl.create_default_context()
-                context.check_hostname = False
-                context.verify_mode = ssl.CERT_NONE
-                sock = context.wrap_socket(sock, server_hostname=ip)
+            if stls_resp and stls_resp.startswith("220"):
+                try:
+                    context = ssl.create_default_context()
+                    context.check_hostname = False
+                    context.verify_mode = ssl.CERT_NONE
+                    sock = context.wrap_socket(sock, server_hostname=ip)
+                    # Повторяем EHLO внутри TLS
+                    tls_ehlo = send_command(sock, SMTP_EHLO.format(domain=domain))
+                    if tls_ehlo and tls_ehlo.startswith("250"):
+                        ehlo_resp = tls_ehlo
+                except:
+                    pass
+
+        # DEBUG: показываем что вернул EHLO
+        log.debug(f"EHLO response ({ip}:{port}): {ehlo_resp[:200]}")        
         
         # RSET
         send_command(sock, SMTP_RSET)

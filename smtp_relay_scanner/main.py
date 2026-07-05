@@ -131,27 +131,64 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def load_targets(filepath: str) -> List[Tuple[str, int]]:
-    """Загружает список целей из файла."""
+def load_targets(filepath: str) -> Tuple[List[Tuple[str, int]], Dict[Tuple[str, int], Tuple[str, str]]]:
+    """
+    Загружает цели и credentials из файла.
+    
+    Поддерживаемые форматы строк:
+    - host:port
+    - host:port:user:pass
+    
+    Returns:
+        (targets, creds_map)
+        targets: list of (host, port)
+        creds_map: {(host, port): (user, pass)}
+    """
     targets = []
+    creds_map = {}
+    creds_count = 0
+    
     try:
-        with open(filepath, 'r') as f:
+        with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
             for line in f:
                 line = line.strip()
                 if not line or line.startswith('#'):
                     continue
-                if ':' in line:
-                    ip, port = line.rsplit(':', 1)
+                
+                parts = line.split(':')
+                
+                if len(parts) == 2:
+                    # Формат: host:port
+                    host, port_str = parts
                     try:
-                        targets.append((ip.strip(), int(port.strip())))
+                        port = int(port_str)
+                        targets.append((host, port))
                     except ValueError:
                         print(f"[-] Invalid line: {line}")
+                
+                elif len(parts) >= 4:
+                    # Формат: host:port:user:pass
+                    host = parts[0]
+                    try:
+                        port = int(parts[1])
+                    except ValueError:
+                        print(f"[-] Invalid line: {line}")
+                        continue
+                    user = parts[2]
+                    password = ':'.join(parts[3:])
+                    targets.append((host, port))
+                    creds_map[(host, port)] = (user, password)
+                    creds_count += 1
+                
                 else:
-                    targets.append((line.strip(), 25))
-        print(f"[+] Loaded {len(targets)} targets from {filepath}")
+                    print(f"[-] Invalid line: {line}")
+        
+        print(f"[+] Loaded {len(targets)} targets ({creds_count} with credentials) from {filepath}")
+    
     except FileNotFoundError:
         print(f"[-] File not found: {filepath}")
-    return targets
+    
+    return targets, creds_map
 
 
 def load_recipients(filepath: str) -> List[str]:
@@ -164,31 +201,6 @@ def load_recipients(filepath: str) -> List[str]:
     except FileNotFoundError:
         print(f"[-] File not found: {filepath}")
     return recipients
-
-
-def load_creds_from_file(filepath: str) -> List[Tuple[str, int, str, str]]:
-    """Загружает SMTP credentials в формате host:port:user:pass"""
-    creds = []
-    try:
-        with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith('#'):
-                    continue
-                parts = line.split(':')
-                if len(parts) >= 4:
-                    host = parts[0]
-                    try:
-                        port = int(parts[1])
-                    except ValueError:
-                        continue
-                    user = parts[2]
-                    password = ':'.join(parts[3:])
-                    creds.append((host, port, user, password))
-        print(f"[+] Loaded {len(creds)} SMTP credentials from {filepath}")
-    except FileNotFoundError:
-        print(f"[-] File not found: {filepath}")
-    return creds
 
 
 def resolve_domain(domain: str) -> List[Tuple[str, int]]:
@@ -233,9 +245,11 @@ def run_full_scan(args: argparse.Namespace) -> List[Dict]:
     if args.domain:
         targets = resolve_domain(args.domain)
     
+    creds_map = {}
     if args.targets:
-        file_targets = load_targets(args.targets)
+        file_targets, file_creds = load_targets(args.targets)
         targets.extend(file_targets)
+        creds_map.update(file_creds)
     
     if args.shodan_api:
         print("[*] Searching Shodan...")
@@ -263,7 +277,10 @@ def run_full_scan(args: argparse.Namespace) -> List[Dict]:
     print("="*60)
     
     # Извлекаем IP адреса из targets (убираем порты — будут сканироваться отдельно)
-    unique_ips = list(set(ip for ip, port in targets))
+    # Извлекаем уникальные хосты и резолвим DNS
+    unique_hosts = list(set(host for host, port in targets))
+    unique_ips = resolve_hosts(unique_hosts)
+    print(f"[*] Resolved {len(unique_hosts)} hosts to {len(unique_ips)} IPs")
     ports = [int(p) for p in args.scan_ports.split(',')]
     
     if not unique_ips:
@@ -298,14 +315,6 @@ def run_full_scan(args: argparse.Namespace) -> List[Dict]:
     print("="*60)
     
     relay_targets = [(h['ip'], h['port']) for h in live_hosts]
-    
-    # Загружаем credentials если есть
-    creds_map = {}
-    if args.targets:
-        file_creds = load_creds_from_file(args.targets)
-        for host, port, user, pwd in file_creds:
-            creds_map[(host, port)] = (user, pwd)
-    
     results = bulk_relay_check(relay_targets, max_workers=args.threads, creds_map=creds_map)
     
     # === Этап 5: Дополнительные проверки ===
@@ -495,6 +504,23 @@ def main():
         import traceback
         traceback.print_exc()
         sys.exit(1)
+
+
+def resolve_hosts(hosts: List[str]) -> List[str]:
+    """Резолвит список hostname в IP-адреса, удаляет дубликаты."""
+    import socket
+    resolved = []
+    for host in hosts:
+        try:
+            socket.inet_pton(socket.AF_INET, host)
+            resolved.append(host)
+        except OSError:
+            try:
+                ip = socket.gethostbyname(host)
+                resolved.append(ip)
+            except Exception:
+                print(f"[-] DNS resolution failed: {host}")
+    return list(set(resolved))
 
 
 if __name__ == "__main__":

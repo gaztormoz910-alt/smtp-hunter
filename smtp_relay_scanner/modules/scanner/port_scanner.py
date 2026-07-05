@@ -176,7 +176,7 @@ def expand_cidr_to_ips(cidr: str) -> List[str]:
 # === Универсальная точка входа ===
 
 def scan_hosts(
-    ip_list: List[str],
+    host_list: List[str],
     ports: Optional[List[int]] = None,
     use_async: bool = True,
     concurrency: int = 200,
@@ -184,34 +184,80 @@ def scan_hosts(
 ) -> List[Tuple[str, int]]:
     """
     Универсальная функция сканирования.
-    Автоматически выбирает async или sync.
+    Автоматически резолвит DNS и выбирает async или sync.
     
     Returns:
-        List of (ip, port)
+        List of (host, port) — открытые порты
     """
-    if not ip_list:
+    if not host_list:
         return []
 
     if use_async:
         try:
-            return run_async_scan(ip_list, ports, concurrency, timeout)
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            results = loop.run_until_complete(
+                async_scan_hosts_with_resolve(host_list, ports, concurrency, timeout)
+            )
+            loop.close()
+            return results
         except Exception as e:
             log.warning(f"Async scan failed, falling back to sync: {e}")
 
     # Sync fallback
     from concurrent.futures import ThreadPoolExecutor, as_completed
     results = []
+    resolved = [resolve_hostname(h) for h in host_list]
     with ThreadPoolExecutor(max_workers=min(concurrency, 100)) as executor:
-        future_to_ip = {
-            executor.submit(scan_ip_ports_sync, ip, ports): ip
-            for ip in ip_list
+        future_to_host = {
+            executor.submit(scan_ip_ports_sync, ip, ports): (host, ip)
+            for host, ip in zip(host_list, resolved)
         }
-        for future in as_completed(future_to_ip):
-            ip = future_to_ip[future]
+        for future in as_completed(future_to_host):
+            host, ip = future_to_host[future]
             try:
                 open_ports = future.result()
                 for port in open_ports:
-                    results.append((ip, port))
+                    results.append((host, port))
             except:
                 pass
     return results
+
+
+def resolve_hostname(host: str) -> str:
+    """Резолвит hostname в IP. Если уже IP — возвращает как есть."""
+    import socket
+    try:
+        # Проверяем, не IP ли это уже
+        socket.inet_pton(socket.AF_INET, host)
+        return host
+    except OSError:
+        pass
+    try:
+        return socket.gethostbyname(host)
+    except:
+        return host
+
+
+async def async_scan_hosts_with_resolve(
+    hosts: List[str],
+    ports: List[int],
+    concurrency: int = 200,
+    timeout: int = TIMEOUT_CONNECT
+) -> List[Tuple[str, int]]:
+    """
+    Сканирует хосты с предварительным DNS-резолвом.
+    """
+    # Резолвим все хосты в IP
+    resolved = {}
+    for host in hosts:
+        ip = resolve_hostname(host)
+        resolved[host] = ip
+    
+    # Сканируем по IP
+    ip_list = list(resolved.values())
+    results = await async_mass_scan(ip_list, ports, concurrency, timeout)
+    
+    # Мапим IP обратно в исходные хосты
+    ip_to_host = {v: k for k, v in resolved.items()}
+    return [(ip_to_host.get(ip, ip), port) for ip, port in results]
