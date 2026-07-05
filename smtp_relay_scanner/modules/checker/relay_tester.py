@@ -68,7 +68,9 @@ def run_relay_test(
     domain: str = DEFAULT_HELO_DOMAIN,
     use_ssl: bool = False,
     test_id: str = "test01",
-    source_ip: str = "0.0.0.0"
+    source_ip: str = "0.0.0.0",
+    username: Optional[str] = None,
+    password: Optional[str] = None,
 ) -> Dict[str, any]:
     """
     Выполняет один тест на open relay.
@@ -109,6 +111,16 @@ def run_relay_test(
                 sock.close()
                 return result
         
+        # AUTH (если есть credentials)
+        if username and password and "AUTH" in ehlo_resp.upper():
+            auth_resp = _try_auth(sock, username, password)
+            if not auth_resp:
+                result["error"] = "AUTH failed"
+                send_command(sock, SMTP_QUIT)
+                sock.close()
+                return result
+            log.debug(f"AUTH successful for {username}")
+
         # STARTTLS (если advertised)
         if not use_ssl and "STARTTLS" in ehlo_resp.upper():
             stls_resp = send_command(sock, "STARTTLS\r\n")
@@ -188,13 +200,15 @@ def check_open_relay(
     port: int,
     domain: str = DEFAULT_HELO_DOMAIN,
     use_ssl: bool = False,
-    source_ip: str = "0.0.0.0"
+    source_ip: str = "0.0.0.0",
+    username: Optional[str] = None,
+    password: Optional[str] = None
 ) -> Dict[str, any]:
     """
     Полная проверка хоста на Open Relay всеми 6 методами.
     
-    Returns:
-        Dict с результатами всех тестов и общим вердиктом
+    Args:
+        username/password: если переданы — пробует AUTH перед тестами
     """
     print(f"[*] Checking relay on {ip}:{port}...")
     
@@ -210,7 +224,7 @@ def check_open_relay(
     }
     
     for test in RELAY_TESTS:
-        test_result = run_relay_test(ip, port, test, domain, use_ssl, test["id"], source_ip)
+        test_result = run_relay_test(ip, port, test, domain, use_ssl, test["id"], source_ip, username, password)
         results["tests"].append(test_result)
         
         if test_result["success"]:
@@ -236,23 +250,65 @@ def check_open_relay(
     return results
 
 
+def _try_auth(sock: socket.socket, username: str, password: str) -> bool:
+    """
+    Пробует аутентификацию: AUTH PLAIN, если не сработало — AUTH LOGIN.
+    Returns: True если успешно, иначе False.
+    """
+    import base64
+    
+    try:
+        # Пробуем AUTH PLAIN
+        auth_str = f"\0{username}\0{password}"
+        auth_b64 = base64.b64encode(auth_str.encode()).decode()
+        
+        resp = send_command(sock, f"AUTH PLAIN {auth_b64}\r\n")
+        if resp.startswith(("235", "334")):
+            return True
+        
+        # Если PLAIN не сработал — пробуем AUTH LOGIN
+        sock.sendall(b"RSET\r\n")
+        recv_response(sock)
+        
+        resp = send_command(sock, "AUTH LOGIN\r\n")
+        if resp.startswith("334"):
+            user_b64 = base64.b64encode(username.encode()).decode()
+            resp = send_command(sock, f"{user_b64}\r\n")
+            if resp.startswith("334"):
+                pass_b64 = base64.b64encode(password.encode()).decode()
+                resp = send_command(sock, f"{pass_b64}\r\n")
+                if resp.startswith("235"):
+                    return True
+        
+        return False
+    except:
+        return False
+
+
 def bulk_relay_check(
     hosts: List[Tuple[str, int]],
     domain: str = DEFAULT_HELO_DOMAIN,
     max_workers: int = 50,
-    source_ip: str = "0.0.0.0"
+    source_ip: str = "0.0.0.0",
+    creds_map: Optional[Dict[Tuple[str, int], Tuple[str, str]]] = None
 ) -> List[Dict[str, any]]:
     """
     Массовая проверка списка хостов на open relay.
+    creds_map: { (host, port): (username, password) } для AUTH
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
     
+    if creds_map is None:
+        creds_map = {}
+    
     all_results = []
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_host = {
-            executor.submit(check_open_relay, ip, port, domain, False, source_ip): (ip, port)
-            for ip, port in hosts
-        }
+        future_to_host = {}
+        for ip, port in hosts:
+            user, pwd = creds_map.get((ip, port), (None, None))
+            future_to_host[
+                executor.submit(check_open_relay, ip, port, domain, False, source_ip, user, pwd)
+            ] = (ip, port)
         
         for future in as_completed(future_to_host):
             try:

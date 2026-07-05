@@ -28,7 +28,7 @@ from smtp_relay_scanner.modules.recon.censys_search import search_smtp_servers_c
 from smtp_relay_scanner.modules.recon.mx_resolver import get_ips_from_domain
 from smtp_relay_scanner.modules.recon.google_dorks import google_dorks_search, parse_smtp_credentials
 
-from smtp_relay_scanner.modules.scanner.port_scanner import mass_scan
+from smtp_relay_scanner.modules.scanner.port_scanner import scan_hosts
 from smtp_relay_scanner.modules.scanner.live_checker import bulk_check
 
 from smtp_relay_scanner.modules.checker.preflight import preflight_check, print_preflight_report
@@ -166,6 +166,31 @@ def load_recipients(filepath: str) -> List[str]:
     return recipients
 
 
+def load_creds_from_file(filepath: str) -> List[Tuple[str, int, str, str]]:
+    """Загружает SMTP credentials в формате host:port:user:pass"""
+    creds = []
+    try:
+        with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                parts = line.split(':')
+                if len(parts) >= 4:
+                    host = parts[0]
+                    try:
+                        port = int(parts[1])
+                    except ValueError:
+                        continue
+                    user = parts[2]
+                    password = ':'.join(parts[3:])
+                    creds.append((host, port, user, password))
+        print(f"[+] Loaded {len(creds)} SMTP credentials from {filepath}")
+    except FileNotFoundError:
+        print(f"[-] File not found: {filepath}")
+    return creds
+
+
 def resolve_domain(domain: str) -> List[Tuple[str, int]]:
     """Получает список целей по домену."""
     print(f"[*] Resolving domain: {domain}")
@@ -232,13 +257,34 @@ def run_full_scan(args: argparse.Namespace) -> List[Dict]:
         print("[-] No targets found. Use --domain, --targets, or --shodan-api.")
         return []
     
-    # === Этап 2: Живые хосты ===
+    # === Этап 2: Сканирование портов ===
     print("\n" + "="*60)
-    print("[PHASE 2] Live Host Check")
+    print("[PHASE 2] Port Scanning")
     print("="*60)
     
+    # Извлекаем IP адреса из targets (убираем порты — будут сканироваться отдельно)
+    unique_ips = list(set(ip for ip, port in targets))
     ports = [int(p) for p in args.scan_ports.split(',')]
-    live_hosts = bulk_check(targets, max_workers=args.threads)
+    
+    if not unique_ips:
+        print("[-] No IPs to scan.")
+        return []
+    
+    print(f"[*] Scanning {len(unique_ips)} unique IPs on ports {ports}...")
+    scanned = scan_hosts(unique_ips, ports, use_async=True, concurrency=args.threads)
+    
+    if not scanned:
+        print("[-] No open ports found during scanning.")
+        return []
+    
+    print(f"[+] Found {len(scanned)} open ports")
+    
+    # === Этап 3: Живые хосты ===
+    print("\n" + "="*60)
+    print("[PHASE 3] Live Host Check")
+    print("="*60)
+    
+    live_hosts = bulk_check(scanned, max_workers=args.threads)
     
     if not live_hosts:
         print("[-] No live SMTP hosts found.")
@@ -246,18 +292,26 @@ def run_full_scan(args: argparse.Namespace) -> List[Dict]:
     
     print(f"[+] Live hosts: {len(live_hosts)}")
     
-    # === Этап 3: Relay Check ===
+    # === Этап 4: Relay Check ===
     print("\n" + "="*60)
-    print("[PHASE 3] Open Relay Testing")
+    print("[PHASE 4] Open Relay Testing")
     print("="*60)
     
     relay_targets = [(h['ip'], h['port']) for h in live_hosts]
-    results = bulk_relay_check(relay_targets, max_workers=args.threads)
     
-    # === Этап 4: Дополнительные проверки ===
+    # Загружаем credentials если есть
+    creds_map = {}
+    if args.targets:
+        file_creds = load_creds_from_file(args.targets)
+        for host, port, user, pwd in file_creds:
+            creds_map[(host, port)] = (user, pwd)
+    
+    results = bulk_relay_check(relay_targets, max_workers=args.threads, creds_map=creds_map)
+    
+    # === Этап 5: Дополнительные проверки ===
     if args.preflight:
         print("\n" + "="*60)
-        print("[PHASE 4a] Pre-flight Checks")
+        print("[PHASE 5a] Pre-flight Checks")
         print("="*60)
         for r in results:
             pf = preflight_check(r['ip'], r['port'])
@@ -265,7 +319,7 @@ def run_full_scan(args: argparse.Namespace) -> List[Dict]:
     
     if args.vrfy:
         print("\n" + "="*60)
-        print("[PHASE 4b] User Enumeration (VRFY/RCPT)")
+        print("[PHASE 5b] User Enumeration (VRFY/RCPT)")
         print("="*60)
         for r in results[:5]:  # Только первые 5 для демо
             users = enum_users(r['ip'], r['port'], 
@@ -276,7 +330,7 @@ def run_full_scan(args: argparse.Namespace) -> List[Dict]:
     
     if args.spf:
         print("\n" + "="*60)
-        print("[PHASE 4c] SPF Enforcement Check")
+        print("[PHASE 5c] SPF Enforcement Check")
         print("="*60)
         for r in results:
             if r.get('relay_level') in ('OPEN', 'PARTIAL'):
@@ -286,16 +340,16 @@ def run_full_scan(args: argparse.Namespace) -> List[Dict]:
     
     if args.smuggling:
         print("\n" + "="*60)
-        print("[PHASE 4d] SMTP Smuggling Check")
+        print("[PHASE 5d] SMTP Smuggling Check")
         print("="*60)
         for r in results:
             smug = test_smtp_smuggling(r['ip'], r['port'])
             if smug.get('vulnerable'):
                 print(f"    [!] {r['ip']}:{r['port']} — {smug['summary']}")
     
-    # === Этап 5: Экспорт ===
+    # === Этап 6: Экспорт ===
     print("\n" + "="*60)
-    print("[PHASE 5] Export Results")
+    print("[PHASE 6] Export Results")
     print("="*60)
     
     if args.json:
